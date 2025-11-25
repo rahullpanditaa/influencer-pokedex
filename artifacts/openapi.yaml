@@ -7,33 +7,54 @@ servers:
   - url: https://api.influencerpokedex.com/v1
 paths:
   /search:
-    parameters:
-      - name: q
-        in: query 
-        required: true
-        schema:
-          type: string
-      - name: platform
-        in: query
-        required: true
-        schema:
-          type: string
-      - name: min_followers
-        in: query
-        required: true
-        schema:
-          type: integer
-      - name: max_followers
-        in: query
-        required: true
-        schema:
-          type: integer
-      - name: limit
-        in: query
-        required: false
-        schema:
-          type: integer
-          default: 20
     get:
-      summary: Get back creators 
-      description: Get back a list of creators on the platform
+      summary: Search for creators
+      description: Search for creators across YouTube and instagram using metadata filters.
+      parameters:
+        - name: q
+          in: query 
+          required: false
+          description: Free-text search query (semantic + keyword).
+          schema:
+            type: string
+
+        - name: platform
+          in: query
+          required: false
+          description: Filter by platform (youtube or instagram).
+          schema:
+            type: string
+            enum: [youtube, instagram]
+
+        - name: primary_niche
+          in: query
+          required: false
+          description: Filter by primary niche.
+          schema:
+            type: string
+
+        - name: min_followers
+          in: query
+          required: false
+          description: Minimum followers/subsribers count
+          schema:
+            type: integer
+            minimum: 0
+
+        - name: max_followers
+          in: query
+          required: false
+          description: Maximum followers/subscribers count.
+          schema:
+            type: integer
+            minimum: 0
+
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of creators to return.
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
