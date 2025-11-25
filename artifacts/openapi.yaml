@@ -1,0 +1,8 @@
+openapi: 3.1.0
+info:
+  title: Influencer Pokedex API
+  version: 1.0.0
+  description: An API for searching for creators and associated information
+servers:
+  - url: https://api.influencerpokedex.com/v1
+paths:
