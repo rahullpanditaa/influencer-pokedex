@@ -1,0 +1,12 @@
+[project]
+name = "notebook"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.1.0",
+    "numpy>=2.3.5",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=5.1.2",
+]
