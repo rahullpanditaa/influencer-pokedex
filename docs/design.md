@@ -114,9 +114,9 @@ Normalization produces three main entity types:
   - Represents a unit of content (video/post).
   - Fields: `creator_account_id`, `content_type` (video/post/short), `title_or_caption`, `description`, `published_at`, and engagement stats (views, likes, comments).
 
-<!-- - **MetricSnapshot** (optional for MVP, but anticipated)
+- **MetricSnapshot**
   - Time-series metrics per creator account or content item (e.g., daily counters).
-  - Enables trend and growth analysis without overloading main content tables. -->
+  - Enables trend and growth analysis without overloading main content tables.
 
 ### 3.3 Raw Storage
 
@@ -156,7 +156,7 @@ MVP rules:
   - Cross-linked bios (e.g., YouTube bio links to Instagram profile).
 
 - **Light semantic similarity**
-  - Compare bio embeddings across accounts (cosine similarity above a high min).
+  - Compare bio embeddings across accounts (cosine similarity above a high minimum threshold).
   - Optional?? basic image similarity between profile pictures (if available).
 
 If/when match found:
