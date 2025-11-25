@@ -70,4 +70,46 @@ paths:
                   creators:
                     type: array
                     items:
-                      $
+                      $ref: '#/components/schemas/Creator'
+
+components:
+  schemas:
+    Creator:
+      type: object
+      required: [id, name, primary_niche, summary]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        primary_niche:
+          type: string
+        secondary_niches:
+          type: array
+          items:
+            type: string
+        style:
+          type: string
+        summary:
+          type: string
+        score:
+          type: number
+          description: Hybrid ranking score (semantic + keyword + quality)
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/CreatorAccount'
+
+    CreatorAccount:
+      type: object
+      required: [platform, username]
+      properties:
+        platform:
+          type: string
+          enum: [youtube, instagram]
+        username:
+          type: string
+        followers:
+          type: integer
+          minimum: 0
