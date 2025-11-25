@@ -58,3 +58,16 @@ paths:
             default: 20
             minimum: 1
             maximum: 100
+
+      responses:
+        '200':
+          description: A list of creators that match the search criteria
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  creators:
+                    type: array
+                    items:
+                      $
