@@ -6,3 +6,34 @@ info:
 servers:
   - url: https://api.influencerpokedex.com/v1
 paths:
+  /search:
+    parameters:
+      - name: q
+        in: query 
+        required: true
+        schema:
+          type: string
+      - name: platform
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: min_followers
+        in: query
+        required: true
+        schema:
+          type: integer
+      - name: max_followers
+        in: query
+        required: true
+        schema:
+          type: integer
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 20
+    get:
+      summary: Get back creators 
+      description: Get back a list of creators on the platform
