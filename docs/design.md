@@ -436,3 +436,24 @@ While the MVP targets 1M creators and two platforms, the architecture is designe
 
 Core separations (offline enrichment vs online search, creator vs account vs content, embeddings vs metadata) remain stable as scale and product surface grow.
 
+### Trade-offs and Scaling Roadmap
+
+#### 1. What I would ship now (Pre-PMF)
+- Only YT + Instagram
+- Simple ingestion + workers model
+- Basic embeddings (+ BM25 for searching) + simple LLM enrichment
+
+
+
+
+#### 2. What I would build after PMF
+- Including TikTok and X as data sources
+- ML-based ranking models
+- Complex orchestration (Kafka/Airflow)
+
+
+#### 3. Evolution of the architecture over the next 12-14 months
+- Move from cron workers to Airflow (maybe Dasgter?)
+- Move from local vector DB  -> managed scalable vector DB (this would happen very very soon)
+- Improve identity resolution, multi-tenant architecture
+
