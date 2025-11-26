@@ -1,462 +1,142 @@
-# Design Document (MVP: 1M Creators)
+# Influencer Pokedex — Design Document
 
 ## 1. System Overview
 
-The **influencer-pokedex** is an influencer discovery platform that scales to ~1M creators across YouTube and Instagram in the MVP
+This system is designed to help users discover influencers across multiple platforms by unifying creator data, enriching it with AI, and supporting fast, high-quality search. The initial goal is to support around one million creators across YouTube and Instagram, with a roadmap that scales to hundreds of millions.
 
-At a high level, the system:
+At its core, the system collects creator data from platform APIs, normalizes it into a consistent structure, enriches it using embeddings and LLMs, and stores everything in a combination of relational and vector databases. A hybrid search layer (keyword + semantic -> RRF) enables users to find creators based on interests, niches, and content themes.
 
-1. Ingests creator and content data from YouTube and Instagram at different cadences based on creator activity levels.
-2. Normalizes different platform payloads (i.e. API responses) into a unified internal schema.
-3. Generates embeddings and resolves platform accounts into canonical creators.
-4. Runs LLM-based enrichment to assign each creator a primary niche, secondary niches, content style, and a short summary.
-5. Stores structured metadata in a relational database and embeddings in a vector index.
-6. Exposes a search API that combines keyword-based retrieval with semantic vector search and simple ranking to return relevant creators.
-
-Operationally, the system is split into:
-
-- **Offline / batch layer (Python):** ingestion, normalization, embeddings, LLM classification, identity resolution, indexing.
-- **Online / serving layer (Go):** search API, hybrid retrieval, ranking, and per-request orchestration.
-
-MVP focuses on YouTube + Instagram and 1M creators, but the design anticipates integrating TikTok and X, scaling upto 250M+ creators.
+The design aims for simplicity in the early stages while leaving room for growth and more sophisticated features as the product matures.
 
 ---
 
-## 2. Ingestion Pipeline
+## 2. Data Model and Partitioning
 
-<!-- ### 2.1 Goals & Assumptions
+The system relies on a small, well-defined set of entities:
 
-- Keep creator and content data fresh enough for discovery use cases.
-- Respect platform rate limits and avoid bans.
-- Support incremental scaling from thousands to millions of creators. -->
+* **Creator** — a single real person or brand, regardless of how many platforms they exist on. This is the central identity in the system.
+* **CreatorAccount** — a platform-specific account (a YouTube channel or Instagram profile). A creator can have several of these.
+* **ContentItem** — a post or video belonging to a creator’s account.
 
-### 2.1 Update Cadence and Activity Buckets
-
-Creators are bucketed by activity:
-
-- **Active creators:**  
-  - At least one YouTube video (long-form or YT shorts) in the past 7 days  
-  - OR at least one Instagram post in the past 7 days  
-  → **Refresh daily**
-
-- **Semi-active creators:**  
-  - Some content in the last 30 days but not meeting “active” criteria  
-  → **Refresh every 72 hours**
-
-- **Long-tail creators:**  
-  - No recent activity, or low-priority for customers  
-  → **Refresh weekly**
-
-The **Scheduler** periodically recomputes these buckets based on recent content timestamps.
-
-### 2.2 Scheduling, Job Dispatch, and Workers
-
-The ingestion pipeline has three main components:
-
-- **Scheduler**
-  - Periodically selects creators due for refresh based on activity bucket.
-  - Gives out ingestion jobs of the form `(creator_id, platform, priority)`.
-
-- **Job Queue**
-  - Stores ingestion jobs and smooths bursts of work.
-  - Priority or separate queues can be used to ensure active creators are refreshed first.
-
-- **Per-platform Ingestion Workers**
-  - Pull jobs from the queue.
-  - Call platform APIs (YouTube, Instagram) to fetch:
-    - profile/channel info
-    - recent content (last N videos/posts)
-    - stats (followers/subscribers, views, likes, comments)
-  - Push raw API responses into the normalization pipeline and raw store.
-
-### 2.3 Rate Limiting, Retries, and Backfills
-
-- **Rate-limit tracker**
-  - Maintains per-platform and per-API-key counters and known reset windows.
-  - Workers consult this tracker before making calls.
-  - When close to limit, workers will (should 🙂) back off, or reduce concurrency.
-
-- **Retry strategy**
-  - Transient failures (network, 5xx code) → exponential backoff with a small max retry count.
-  - Hard failures (4xx like auth issues) → job moved to a dead-letter queue (DLQ) with alerting.
-  - Rate-limit failures → job added back to queue with a delay aligned to limit reset.
-
-- **Backfills**
-  - For new creators or large historical refreshes, the scheduler gives out lower-priority backfill jobs.
-  - Backfills run with lower concurrency, can be throttled so they don’t interfere with ongoing freshness.
-
-This design allows scaling ingestion by horizontally scaling workers and splitting queues per platform or activity tier as creator count grows.
+This structure prevents duplication and makes it easy to extend the system when new platforms are added. For now, partitioning is kept simple; content items may later be partitioned by date, and creator accounts by platform or hashed ID as the volume grows. Embeddings live in a vector database.
 
 ---
 
-## 3. Normalization & Raw Storage
+## 3. Ingestion Cadence, Scaling, Retries, and Backfills
 
-### 3.1 Motivation
+Creators are updated on different schedules depending on their activity:
 
-YouTube and Instagram APIs return different payloads: different field names, nesting, and semantics. Feeding raw platform data directly into LLMs, has several downsides:
+* **Active creators** — updated daily.
+* **Semi-active creators** — updated every 72 hours.
+* **Inactive creators** — updated weekly.
 
-- Prompts become complex.
-- LLM outputs become inconsistent across platforms.
-- Storage and indexing become harder to manage and evolve.
-- Adding new platforms later becomes difficult.
+A scheduler determines when each creator should be refreshed and pushes jobs into a queue. Platform-specific workers pull jobs, fetch API data, and handle platform rate limits. Automatic retries and backoff logic ensure resilience against temporary API failures.
 
-Normalization solves this by converting all payloads into a unified internal schema.
-
-### 3.2 Unified Schema: Core Entities
-
-Normalization produces three main entity types:
-
-- **CreatorAccount**
-  - Represents an account on a specific platform (YouTube channel or Instagram profile).
-  - Fields: `platform`, `platform_user_id`, `display_name`, `handle`, `bio`, `profile_image_url`, basic follower/subscriber stats, etc.
-
-- **ContentItem**
-  - Represents a unit of content (video/post).
-  - Fields: `creator_account_id`, `content_type` (video/post/short), `title_or_caption`, `description`, `published_at`, and engagement stats (views, likes, comments).
-
-- **MetricSnapshot**
-  - Time-series metrics per creator account or content item (e.g., daily counters).
-  - Enables trend and growth analysis without overloading main content tables.
-
-### 3.3 Raw Storage
-
-- Full, unmodified API responses are stored in a **raw data store** for:
-  - Auditing issues,
-  - Reprocessing with improved logic,
-  - Debugging data anomalies.
-
-- Normalized `CreatorAccount`, `ContentItem`, and `MetricSnapshot` records form the input to embedding generation, identity resolution, and enrichment.
+As the system grows, more workers can be added horizontally. Backfills run when schemas change or new enrichment steps are introduced.
 
 ---
 
-## 4. Identity Resolution
+## 4. Identity Resolution Across Platforms
 
-Creators often have multiple accounts across platforms (e.g., YouTube + Instagram). The system needs to connect these into a single **canonical creator** to:
+Many creators exist on multiple platforms, and the system needs to unify them into a single Creator entity.
 
-- Present a unified profile to users.
-- Aggregate metrics across platforms.
-- Avoid duplicate search results.
+The MVP uses a combination of:
 
-### 4.1 Canonical Creator Model
+* Simple heuristics (name similarity, linked usernames, overlapping handles)
+* Embedding similarity between bios and captions
 
-- **Creator** (canonical entity)
-  - Internal `creator_id`.
-  - Linked to one or more `CreatorAccount` records (YT, IG).
-  - Later enriched with final niche, style, and summary.
-
-### 4.2 MVP Identity Resolution Logic
-
-Identity resolution runs after normalization and after an initial round of basic embeddings, and before final creator-level enrichment.
-
-MVP rules:
-
-- **Deterministic matching**
-  - Exact or near-exact handle/username match.
-  - Matching website or email in profiles.
-  - Cross-linked bios (e.g., YouTube bio links to Instagram profile).
-
-- **Light semantic similarity**
-  - Compare bio embeddings across accounts (cosine similarity above a high minimum threshold).
-  - Optional?? basic image similarity between profile pictures (if available).
-
-If/when match found:
-
-- Accounts merged under a single `creator_id`.
-- A confidence score can be recorded for future improvement or human review.
-
-This step ensures that expensive LLM enrichment is performed **once per real creator**, not once per account.
+If two accounts score highly enough, they are merged under a single creator. Over time, this can evolve into a more sophisticated identity resolution pipeline that combines graph signals, richer metadata, and scoring models.
 
 ---
 
-## 5. AI Enrichment (Embeddings + LLM Classification)
+## 5. Retrieval and Ranking Flow
 
-AI enrichment has two conceptual phases:
+The search layer brings together different signals to deliver high-quality results.
 
-1. **Per-account embeddings** to support identity resolution and later aggregation.
-2. **Creator-level enrichment** (after identity resolution) to produce final embeddings and labels used in search.
+* A **BM25 keyword index** helps match exact words in bios, captions, and descriptions.
+* A **vector search index** helps capture semantic meaning and related concepts.
+* A **hybrid ranking step** (using Reciprocal Rank Fusion) blends the strengths of both.
 
-### 5.1 Embeddings
-
-For the MVP, the system generates 4 main embeddings per canonical creator:
-
-- **YouTube bio embedding**
-- **YouTube content embedding**
-  - Derived from titles + descriptions of the last N videos (mix of long-form and Shorts).
-- **Instagram bio embedding**
-- **Instagram captions embedding**
-  - Derived from last N post captions.
-
-Workflow:
-
-1. Compute text embeddings per `CreatorAccount` and `ContentItem` where relevant.
-2. After identity resolution, aggregate per-account embeddings to produce per-creator embeddings:
-   - e.g., averaging or weighted average by recency or engagement.
-3. Store final per-creator embeddings in a vector index with fields indicating source (YT bio, YT content, IG bio, IG captions).
-
-These embeddings power semantic similarity search and can also be used as features in later ML ranking models.
-
-### 5.2 LLM Classification
-
-Once a canonical creator exists and embeddings/content are available, the system runs LLM-based enrichment:
-
-- Input: normalized bio + sampled content titles/captions for the creator across platforms.
-- Output:
-  - `primary_niche` (e.g., tech, fitness, beauty, finance, etc.)
-  - `secondary_niches` (up to a few additional categories)
-  - `content_style` (e.g., educational, lifestyle, entertainment, review)
-  - `llm_summary` (short natural-language description: ~20 words)
-
-This classification runs in batch, not per search request:
-
-- Triggered when:
-  - A creator is first ingested.
-  - A creator’s content changes significantly (e.g., content drift detection or periodic re-enrichment).
-- Uses a structured prompt to enforce consistent JSON-like output.
-- Results are written into the Creator metadata store and used directly as filterable fields and ranking signals.
-
-LLMs are **not** in the online search path for MVP; they are used only offline for enrichment.
+A query is embedded using the same model used during enrichment. BM25 returns a ranked list of creators from keyword matches in their bio, vector search returns semantically similar creators, and hybrid fusion produces the final ranking. This helps avoid cases where purely keyword-based or purely semantic search would fail.
 
 ---
 
-## 6. Data Model & Storage Layer
+## 6. AI Usage: Embeddings, Metadata Extraction, and LLM Scoring
 
-### 6.1 Core Entities
+AI is used to add structure and meaning to otherwise sparse creator metadata.
 
-- **Creator**
-  - `creator_id` (PK)
-  - name, canonical handle, profile image
-  - `primary_niche`, `secondary_niches`, `content_style`, `llm_summary`
-  - aggregate stats (e.g., total followers across platforms)
+* **Embeddings** are generated for:
 
-- **CreatorAccount**
-  - `creator_account_id` (PK)
-  - `creator_id` (FK)
-  - `platform` (yt/ig)
-  - platform-specific handle, platform_user_id
-  - platform-level stats (followers/subscribers, etc.)
+  * YouTube bios
+  * Titles and descriptions of recent videos
+  * Instagram bios
+  * Captions of recent posts
 
-- **ContentItem**
-  - `content_id` (PK)
-  - `creator_account_id` (FK)
-  - `content_type` (video/post/short)
-  - `title_or_caption`, `description`, `published_at`
-  - engagement stats (views, likes, comments)
+  These embeddings allow for semantic search and also help with identity resolution.
 
-- **EmbeddingRecord** (conceptual; may be a table or implicit in vector DB)
-  - `creator_id`
-  - `embedding_type` (yt_bio, yt_content, ig_bio, ig_captions)
-  - `vector` (stored in vector index)
-  - `updated_at`
+* **LLM Classification** produces:
 
-- **MetricSnapshot** (optional for MVP)
-  - time-series metrics (daily/weekly aggregates) for creator or content.
+  * Primary niche
+  * Secondary niches
+  * Content style
+  * A concise summary
 
-### 6.2 Partitioning and Scaling
-
-For the MVP scale of 1M creators:
-
-- A single relational database instance (e.g., Postgres/Aurora) is sufficient.
-- Partitioning strategy is more important for content growth than for creators:
-  - `ContentItem` and `MetricSnapshot` can be partitioned by date (e.g., monthly).
-- Indexes on:
-  - `creator_id` for joins.
-  - `platform`, `platform_user_id`, and `creator_account_id` for lookups.
-  - Filterable fields used in search: follower counts, primary_niche, platform, language/region (later).
-
-As the system scales toward 250M+ creators:
-
-- **Horizontal sharding** of the Creator and CreatorAccount tables by `creator_id` hash.
-- **Time-based partitioning** for large content/metrics tables.
-- Vector index scaling via:
-  - sharding by embedding type and/or region,
-  - or using a managed vector database.
-
-Raw data (API responses and historical snapshots) can be stored in an object store to control storage costs.
+This standardized metadata helps improve search precision and makes the system more usable by non-technical users.
 
 ---
 
-## 7. Retrieval & Ranking Flow
+## 7. Monitoring, Observability, and Cost Expectations
 
-### 7.1 Query Types
+Monitoring focuses on:
 
-Search queries typically include:
+* The freshness of creator data
+* How often ingestion jobs fail or retry
+* Search latency and API performance
+* Storage growth across Postgres, S3, and the vector database
 
-- **Filters:**
-  - platforms (YT, IG)
-  - follower/subscriber band
-  - primary/secondary niche
-  - geography (if available)
-  - content style
-
-- **Free-text intent:**
-  - e.g. “backend engineering creators under 500k followers”
-  - e.g. “emerging fitness creators for a new gym launch”
-
-### 7.2 Retrieval Pipeline
-
-At query time:
-
-1. **Parse filters and query text.**
-2. **Keyword retrieval:**
-   - Use creator metadata (niche, summary, bio text) and content titles for keyword or BM25-style search.
-3. **Semantic retrieval:**
-   - Embed the query text into a vector.
-   - Query the vector index against all four embedding fields:
-     - YT bio, YT content, IG bio, IG captions.
-   - Retrieve top-K candidates per embedding type.
-
-4. **Candidate union:**
-   - Combine candidates from keyword and semantic retrieval into a unified candidate set.
-
-### 7.3 Hybrid Scoring & Ranking
-
-Each candidate creator receives:
-
-- `keyword_score` (from textual relevance)
-- `similarity_scores` for each embedding type:
-  - `sim_yt_bio`, `sim_yt_content`, `sim_ig_bio`, `sim_ig_captions`
-- `quality_signals`, e.g.:
-  - follower band
-  - engagement rate
-  - activity status (active / semi-active / long-tail)
-
-A simple scoring function in MVP:
-
-- `semantic_score = w1 * sim_yt_bio + w2 * sim_yt_content + w3 * sim_ig_bio + w4 * sim_ig_captions`
-- `final_score = α * keyword_score + β * semantic_score + γ * quality_score`
-
-Weights `(w1–w4, α, β, γ)` are tunable configuration parameters and can be evolved based on feedback or offline evaluation. For MVP, they can be hand-tuned.
-
-The ranked list is returned through the **Search API** alongside explanatory fields (e.g., why this creator was selected: niche match, semantic similarity, etc.).
-
-LLMs are intentionally not used inline in this path for MVP to keep latency and cost under control. They can be introduced later to re-rank a small top-N candidate set if needed.
+Costs primarily come from enrichment jobs (LLM usage), storage of raw and processed data, and compute for ingestion workers. Costs can be controlled by adjusting update frequency, batching enrichment, and choosing smaller models for long-tail creators.
 
 ---
 
-## 8. Monitoring, Observability & Cost Expectations
+## 8. Security and Multi-Tenancy
 
-### 8.1 Monitoring & Metrics
+For the MVP, the system keeps security simple: a single tenant model with basic API authentication and rate limits.
 
-Key metrics:
+As customers grow:
 
-- **Ingestion freshness**
-  - % of tracked creators updated within their target freshness window.
-  - Per-platform API error rates and latency.
+* Tenant filtering may be enforced at the database level
+* Row-level security can protect cross-tenant visibility
+* Vector databases may maintain separate namespaces per tenant
+* Access logs and audit trails become more important
 
-- **Enrichment coverage**
-  - % of creators with up-to-date embeddings.
-  - % of creators successfully enriched by LLM in the last N days.
-  - LLM error/timeout rate.
-
-- **Search health**
-  - Search API QPS, latency (P50/P95/P99).
-  - Error rates and timeout rates.
-  - Vector index query latency and failure rate.
-
-- **Pipeline health**
-  - Queue depths for ingestion jobs.
-  - Worker utilization.
-  - DLQ volume for failing jobs.
-
-These metrics feed into dashboards and alerting (e.g., if ingestion falls behind, if enrichment error rate spikes, or if search latency regresses).
-
-### 8.2 Cost Drivers & Expectations
-
-At 1M creators, major cost buckets:
-
-- **Compute:**
-  - Ingestion workers.
-  - Batch enrichment jobs (embeddings + LLM).
-  - Vector index and database compute.
-
-- **Storage:**
-  - Creator metadata (small relative to content).
-  - Content and metrics tables.
-  - Raw API responses (ideally in cheap storage).
-  - Vector storage for embeddings.
-
-- **AI:**
-  - Text embedding model calls for creator bios and content snippets.
-  - LLM classification calls per creator, on a periodic schedule (e.g., initial + occasional refresh).
-
-First-order cost controls:
-
-- Limit enrichment frequency for low-activity creators.
-- Truncate historical content used for embeddings (e.g., last 10–20 items).
-- Use cheaper embedding models and only promote to more expensive ones if necessary.
-- Batch and cache LLM calls wherever possible.
-
-As the system grows toward 50M and 250M creators, cost mitigation strategies include:
-
-- Tiering creators (e.g., “premium” tracked more frequently).
-- Moving raw data and old metrics to colder, cheaper storage.
-- Optimizing LLM prompts and batching to reduce usage.
+These changes allow the system to support multiple organizations safely.
 
 ---
 
-## 9. Security & Multi-Tenancy
+## 9. Trade-offs and Scaling Roadmap
 
-### 9.1 Multi-Tenancy Model
+### What I would ship now (Pre-PMF)
 
-MVP assumes a multi-tenant SaaS model where:
+* Support only YouTube and Instagram, focusing on core use cases.
+* Use a simple ingestion pipeline with a scheduler and workers.
+* Use embeddings, BM25, and basic LLM enrichment for ranking and metadata.
 
-- **Global creator graph** (Creator, CreatorAccount, ContentItem, embeddings) is mostly shared.
-- **Tenant-specific metadata** (e.g., notes, lists, hidden creators) is stored in separate tables keyed by `tenant_id`.
+This keeps the system small, inexpensive, and fast to iterate on.
 
-Access control:
+### What I would build after PMF
 
-- Requests are authenticated (e.g., API keys, OAuth).
-- All queries are scoped by `tenant_id` for tenant-specific data.
-- Shared creator data is read-only and common to all tenants.
+* Add TikTok and X as new data sources.
+* Introduce more advanced ranking models based on user interactions.
+* Move from simple workers toward orchestration tools like Airflow or Dagster.
 
-If needed in future, high-revenue tenants can be moved to dedicated databases or isolated indexes.
+This only becomes worth it once usage and customer demand justify the complexity.
 
-### 9.2 Security Considerations
+### Evolution over the next 12–14 months
 
-- All services run in a private network with restricted ingress.
-- Data in transit is encrypted (HTTPS), and data at rest is encrypted in underlying stores.
-- AI providers (embeddings/LLMs) are called through secure channels; prompts avoid sending unnecessary user-specific data.
-- Secrets (API keys, database credentials) are managed by a secrets manager, not hard-coded.
+* Replace cron-style workers with Airflow or Dagster for scalable scheduling.
+* Migrate from local or single-node vector DBs to fully managed, scalable vector databases.
+* Improve identity resolution and strengthen multi-tenant architecture.
 
-Audit logs can track:
-
-- Which tenant searched for what.
-- Configuration changes (e.g., scoring weights, niche taxonomies).
+These steps prepare the system for growth as it scales from one million creators to tens of millions and eventually to hundreds of millions.
 
 ---
-
-## 10. Evolution to 250M+ Creators
-
-While the MVP targets 1M creators and two platforms, the architecture is designed to scale:
-
-- **More platforms:** new platform-specific ingestion workers and normalization adapters feeding the same unified schema.
-- **More creators:** sharded metadata stores by `creator_id`, partitioned content, and scalable vector indexes.
-- **More sophisticated ranking:** log per-query candidate sets and features to train ML ranking models later.
-- **More real-time behavior:** partial support for near-real-time ingestion for high-value creators via higher-priority queues and shorter cadences.
-
-Core separations (offline enrichment vs online search, creator vs account vs content, embeddings vs metadata) remain stable as scale and product surface grow.
-
-### Trade-offs and Scaling Roadmap
-
-#### 1. What I would ship now (Pre-PMF)
-Early stages, priority would be to prove that influencer discovery across several platforms solves a real problem for actual users. Optimize product for simplicity, cost control, and speed of iteration
-- Only YT + Instagram. 
-- Simple ingestion + workers model (cron jobs/background workers and job queue) instead of heavy orchestration tools. This will help keep the operational overhead to a minimum, and will be more than enough to support ~1M creators.
-- Basic embeddings (+ BM25 for searching) + simple LLM enrichment.
-
-`Focus on checking, validating customer workflows.`
-
-#### 2. What I would build after PMF
-After the platform sees some heavy and regular footfall, and customers have come to rely on the search workflows:
-- Including TikTok and X as data sources
-- ML-based ranking models - learning-to-rank; using collected search interactions (saves, clicks etc) to improve ranking quality beyond RRF.
-- Complex orchestration (Kafka/Airflow) - introduce once ingestion volume, frequency of update justifies it.
-
-`Improve ranking quality, platform coverage after it becomes clear that people want the product, would pay for it.`
-
-#### 3. Evolution of the architecture over the next 12-14 months
-As the system scales to tens of millions of creators across 3-4 platforms, the architecture will need to evolve from simple batch jobs -> distributed pipeline:
-- Move from cron workers to Airflow (maybe Dasgter?)
-- Move from local vector DB  -> managed scalable vector DB (this would happen very very soon, embeddings grow quickly)
-- Improve identity resolution, multi-tenant architecture
-
