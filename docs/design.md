@@ -439,21 +439,24 @@ Core separations (offline enrichment vs online search, creator vs account vs con
 ### Trade-offs and Scaling Roadmap
 
 #### 1. What I would ship now (Pre-PMF)
-- Only YT + Instagram
-- Simple ingestion + workers model
-- Basic embeddings (+ BM25 for searching) + simple LLM enrichment
+Early stages, priority would be to prove that influencer discovery across several platforms solves a real problem for actual users. Optimize product for simplicity, cost control, and speed of iteration
+- Only YT + Instagram. 
+- Simple ingestion + workers model (cron jobs/background workers and job queue) instead of heavy orchestration tools. This will help keep the operational overhead to a minimum, and will be more than enough to support ~1M creators.
+- Basic embeddings (+ BM25 for searching) + simple LLM enrichment.
 
-
-
+`Focus on checking, validating customer workflows.`
 
 #### 2. What I would build after PMF
+After the platform sees some heavy and regular footfall, and customers have come to rely on the search workflows:
 - Including TikTok and X as data sources
-- ML-based ranking models
-- Complex orchestration (Kafka/Airflow)
+- ML-based ranking models - learning-to-rank; using collected search interactions (saves, clicks etc) to improve ranking quality beyond RRF.
+- Complex orchestration (Kafka/Airflow) - introduce once ingestion volume, frequency of update justifies it.
 
+`Improve ranking quality, platform coverage after it becomes clear that people want the product, would pay for it.`
 
 #### 3. Evolution of the architecture over the next 12-14 months
+As the system scales to tens of millions of creators across 3-4 platforms, the architecture will need to evolve from simple batch jobs -> distributed pipeline:
 - Move from cron workers to Airflow (maybe Dasgter?)
-- Move from local vector DB  -> managed scalable vector DB (this would happen very very soon)
+- Move from local vector DB  -> managed scalable vector DB (this would happen very very soon, embeddings grow quickly)
 - Improve identity resolution, multi-tenant architecture
 
